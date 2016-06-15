@@ -1,2 +1,2 @@
-# puszek-rootkit
+# Puszek
 linux rootkit
