@@ -2,7 +2,7 @@
 
 rootkit for linux, works by modifying syscall table, it's a kernel module  
   
-## warning: not done yet, list of features is below and what's more rootkit prints debug information to dmesgs  
+## warning: not done yet, list of features is below and what's more rootkit prints debug information to dmesg   
   
 ### features:  
   
@@ -14,9 +14,9 @@ wget http://cdimage.debian.org/debian-cd/8.5.0/amd64/iso-cd/debian-8.5.0-amd64-C
 3. intercepting http (not https!) requests.  
 all intercepted GET and POST http requests will be writen to /etc/http_requests.rootkit  
 when password is sent in request - it's written additionally to /etc/passwords.rootkit  
-4. when hiden application uses internet netstat see port but doesn't see PID and applicatio name  
+4. when hidden application uses internet netstat see port but doesn't see PID and application name  
 
-withot rootkit  
+without rootkit  
 ```
 b@x:~ > sudo netstat -np46
 [...]
