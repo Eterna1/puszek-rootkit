@@ -14,7 +14,8 @@ wget http://cdimage.debian.org/debian-cd/8.5.0/amd64/iso-cd/debian-8.5.0-amd64-C
 3. intercepting http (not https!) requests.  
 all intercepted GET and POST http requests will be writen to /etc/http_requests.rootkit  
 when password is sent in request - it's written additionally to /etc/passwords.rootkit  
-4.when hiden application uses internet netstat see port but doesn't see PID and applicatio name  
+4. when hiden application uses internet netstat see port but doesn't see PID and applicatio name  
+
 withot rootkit  
 ```
 b@x:~ > sudo netstat -np46
