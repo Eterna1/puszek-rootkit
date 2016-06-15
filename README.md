@@ -1,0 +1,2 @@
+# puszek-rootkit
+linux rootkit
