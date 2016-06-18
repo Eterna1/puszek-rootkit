@@ -14,7 +14,8 @@ wget http://cdimage.debian.org/debian-cd/8.5.0/amd64/iso-cd/debian-8.5.0-amd64-C
 3. intercepting http (not https!) requests.  
 all intercepted GET and POST http requests will be writen to /etc/http_requests.rootkit  
 when password is sent in request - it's written additionally to /etc/passwords.rootkit  
-4. when hidden application uses internet netstat see port but doesn't see PID and application name  
+4. rootkit module is invisible in 'lsmod' command, file /proc/modules, and directory /sys/module/  
+5. when hidden application uses internet netstat see port but doesn't see PID and application name  
 
 without rootkit  
 ```
@@ -31,7 +32,7 @@ tcp        0      0 192.168.0.10:54173      130.239.18.176:80       ESTABLISHED 
 [...]
 ```
 
-tested on:  
+### tested on:  
 ```
 Linux x 3.16.0-38-generic #52~14.04.1-Ubuntu SMP Fri May 8 09:43:57 UTC 2015 x86_64 x86_64 x86_64 GNU/Linux  
 ```
