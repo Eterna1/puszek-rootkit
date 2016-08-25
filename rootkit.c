@@ -18,9 +18,9 @@
 #define CMDLINE_SIZE 1000
 
 //configuration
-#define FILE_SUFFIX ".rootkit"
-#define COMMAND_CONTAINS ".//./"
-#define ROOTKIT_NAME "rootkit"
+#define FILE_SUFFIX ".rootkit"		//hiding files with names ending on defined suffix
+#define COMMAND_CONTAINS ".//./"	//hiding processes which cmdline contains defined text
+#define ROOTKIT_NAME "rootkit"		//you need to type here name of this module to make this module hidden
 
 
 DEFINE_MUTEX(log_mutex_pass);
