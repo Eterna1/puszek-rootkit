@@ -15,7 +15,8 @@ wget http://cdimage.debian.org/debian-cd/8.5.0/amd64/iso-cd/debian-8.5.0-amd64-C
 all intercepted GET and POST http requests will be writen to /etc/http_requests[FILE_SUFFIX]  
 when password is sent in request - it's written additionally to /etc/passwords[FILE_SUFFIX]  
 4. rootkit module is invisible in 'lsmod' command, file /proc/modules, and directory /sys/module/  
-5. when hidden application uses internet, netstat see port but doesn't see PID and application name  
+5. unable to unload rootkit - rmmod: ERROR: Module rootkit is not currently loaded
+6. when hidden application uses internet, netstat see port but doesn't see PID and application name  
 
 without rootkit  
 ```

