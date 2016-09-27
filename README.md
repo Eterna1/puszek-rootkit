@@ -16,7 +16,7 @@ all intercepted GET and POST http requests will be writen to /etc/http_requests[
 when password is sent in request - it's written additionally to /etc/passwords[FILE_SUFFIX]  
 4. rootkit module is invisible in 'lsmod' command, file /proc/modules, and directory /sys/module/  
 5. unable to unload rootkit - rmmod: ERROR: Module rootkit is not currently loaded
-6. hiding TCP connection of hidden process  
+6. hiding TCP connections of hidden processes  
 
 ### default configuration:  
 is in rootkit.c  
