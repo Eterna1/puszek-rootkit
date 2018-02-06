@@ -4,8 +4,8 @@ Yet another LKM rootkit for Linux. It hooks syscall table.
   
 ### Features:  
   
-1. Hiding files with names ending on defined suffix (`FILE_SUFFIX` - ".rootkit" by default).  
-2. Hiding processes that cmdline contains defined text (`COMMAND_CONTAINS` - ".//./" by default).  
+1. Hide files that ends on configured suffix (`FILE_SUFFIX` - ".rootkit" by default).  
+2. Hide processes that cmdline contains defined text (`COMMAND_CONTAINS` - ".//./" by default).  
 
 Examples:
 
@@ -17,16 +17,16 @@ Examples:
 wget http://old-releases.ubuntu.com/releases/zesty/ubuntu-17.04-desktop-amd64.iso .//./
 ```
 
-3. Intercepting HTTP requests.  
+3. Intercept HTTP requests.  
 All intercepted GET and POST HTTP requests are logged to `/etc/http_requests[FILE_SUFFIX]`.  
 When password is found in HTTP request it's additionally logged to `/etc/passwords[FILE_SUFFIX]`.
 4. Rootkit module is invisible in `lsmod` output, file `/proc/modules`, and directory `/sys/module/`.  
-5. Unable to unload rootkit by `rmmod` command (if option `UNABLE_TO_UNLOAD` is set).
+5. It isn't possible to unload rootkit by `rmmod` command (if option `UNABLE_TO_UNLOAD` is set).
 6. Netstat and similar tools won't see TCP connections of hidden processes.
 
 ### Configuration:  
 
-Configuration is placed at the beginning of file `rootkit.c`.  
+The configuration is placed at the beginning of file `rootkit.c`.  
 Below is a default configuration:
 
 ```C
