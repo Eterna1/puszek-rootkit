@@ -1,12 +1,14 @@
 # Puszek  
 
-rootkit for linux, works by modifying syscall table, it's a kernel module  
+Yet another LKM rootkit for Linux. It hooks syscall table.
   
-### features:  
+### Features:  
   
 1. hiding files with names ending on defined suffix (`FILE_SUFFIX` - ".rootkit" by default)  
-2. hiding processes which cmdline contains defined text (`COMMAND_CONTAINS` - ".//./" by default)  
+2. hiding processes that cmdline contains defined text (`COMMAND_CONTAINS` - ".//./" by default)  
+
 examples:
+
 ```
 .//./malicious_process
 ```
@@ -14,15 +16,18 @@ examples:
 ``` 
 wget http://old-releases.ubuntu.com/releases/zesty/ubuntu-17.04-desktop-amd64.iso .//./
 ```
-3. intercepting http requests.  
-all intercepted GET and POST http requests will be writen to /etc/http_requests[FILE_SUFFIX]  
-when password is sent in request - it's written additionally to /etc/passwords[FILE_SUFFIX]  
-4. rootkit module is invisible in `lsmod` command, in file `/proc/modules`, and in directory `/sys/module/`  
-5. unable to unload rootkit by `rmmod` command (if `UNABLE_TO_UNLOAD` is set)
+
+3. intercepting HTTP requests.  
+all intercepted GET and POST HTTP requests are logged to `/etc/http_requests[FILE_SUFFIX]` 
+when password is found in HTTP request - it's additionally logged to `/etc/passwords[FILE_SUFFIX]`
+4. rootkit module is invisible in `lsmod` output, file `/proc/modules`, and directory `/sys/module/`  
+5. unable to unload rootkit by `rmmod` command (if option `UNABLE_TO_UNLOAD` is set)
 6. hiding TCP connections of hidden processes  
 
-### default configuration:  
-is in rootkit.c  
+### Configuration:  
+
+Configuration is placed at the beginning of file `rootkit.c`  
+Below is a default configuration:
 
 ```C
 //beginning of the rootkit's configuration
@@ -35,7 +40,7 @@ is in rootkit.c
 //end of configuration
 ```
 
-### tested on:  
+### Tested on:  
 ```
 Linux x 4.13.0-kali1-amd64 #1 SMP Debian 4.13.10-1kali2 (2017-11-08) x86_64 GNU/Linux
 ```
